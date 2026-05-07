@@ -50,130 +50,119 @@ def run_no_correction_workflow(
     )
 
 
-def run_bbknn_workflow(
+def run_combat_workflow(
     adata: ad.AnnData,
     cfg: NormalizationConfig,
     batch_key: str = "batch",
 ) -> ad.AnnData:
-    """
-    Batch correction workflow using BBKNN.
+    from combat.pycombat import pycombat
+    import pandas as pd
 
-    Args:
-        adata: Input AnnData.
-        cfg: Preprocessing/embedding configuration.
-        batch_key: Batch column in ``adata.obs``.
+    a = adata.copy()
+    sc.pp.normalize_total(a, target_sum=cfg.target_sum)
+    sc.pp.log1p(a)
+    sc.pp.highly_variable_genes(a, batch_key=batch_key)
+    a = a[:, a.var["highly_variable"]].copy()
 
-    Returns:
-        AnnData with BBKNN graph, Leiden labels, and UMAP.
-    """
-    bbknn = _load_optional_module("bbknn")
-
-    a = preprocess_for_integration(
-        adata=adata,
-        cfg=cfg,
-        use_hvg_by_batch=True,
-        batch_key_override=batch_key,
-        normalize_per_batch=True,
+    expr_df = pd.DataFrame(
+        a.X.toarray().T, index=a.var_names, columns=a.obs_names
     )
-    n_pcs = min(cfg.n_pcs, a.obsm["X_pca"].shape[1])
-    bbknn.bbknn(a, batch_key=batch_key, n_pcs=n_pcs)
-    sc.tl.leiden(a, resolution=cfg.leiden_resolution)
+    corrected_df = pycombat(expr_df, a.obs[batch_key].tolist())
+    a.X = corrected_df.T.values
+
+    sc.pp.scale(a)
+    n_pcs = _safe_n_pcs(a, cfg.n_pcs)   # _safe_n_pcs импортировать из normalization
+    sc.tl.pca(a, n_comps=n_pcs)
+    sc.pp.neighbors(a, use_rep="X_pca")
+    sc.tl.leiden(a)
     sc.tl.umap(a)
     return a
 
 
-def run_scanorama_workflow(
-    adatas_by_batch: Sequence[ad.AnnData],
-    cfg: NormalizationConfig,
-    batch_labels: Sequence[str] | None = None,
-    batch_key: str = "batch",
-) -> ad.AnnData:
-    """
-    Batch correction workflow using Scanorama.
-
-    Args:
-        adatas_by_batch: List of AnnData objects, one per batch.
-        cfg: Preprocessing/embedding configuration.
-        batch_labels: Optional batch labels for merged AnnData.
-        batch_key: Batch column name in merged AnnData.
-
-    Returns:
-        Integrated AnnData with ``X_scanorama``, neighbors, Leiden, and UMAP.
-    """
-    scanorama = _load_optional_module("scanorama")
-
-    if len(adatas_by_batch) < 2:
-        raise ValueError("Scanorama requires at least 2 batches.")
-
-    prepared = [x.copy() for x in adatas_by_batch]
-    for i, a in enumerate(prepared):
-        prepared[i] = preprocess_for_integration(
-            adata=a,
-            cfg=cfg,
-            use_hvg_by_batch=False,
-        )
-
-    scanorama.integrate_scanpy(prepared)
-
-    keys = (
-        {batch_labels[i]: prepared[i] for i in range(len(prepared))}
-        if batch_labels is not None
-        else {str(i): prepared[i] for i in range(len(prepared))}
-    )
-    a = ad.concat(keys, label=batch_key, join="inner")
-    a.obs_names_make_unique()
-    n_pcs = min(cfg.n_pcs, a.obsm["X_scanorama"].shape[1])
-    sc.pp.neighbors(a, n_pcs=n_pcs, use_rep="X_scanorama")
-    sc.tl.leiden(a, resolution=cfg.leiden_resolution)
-    sc.tl.umap(a)
-    return a
-
-
-def run_harmony_workflow(
+ 
+def run_scvi_workflow(
     adata: ad.AnnData,
-    cfg: NormalizationConfig,
     batch_key: str = "batch",
-    max_iter_harmony: int = 20,
+    n_latent: int = 30,
+    n_layers: int = 2,
+    n_epochs: int = 400,
+    batch_size: int = 1024,
 ) -> ad.AnnData:
-    """
-    Batch correction workflow using Harmony.
+    import scvi
 
-    Args:
-        adata: Input AnnData.
-        cfg: Preprocessing/embedding configuration.
-        batch_key: Batch column in ``adata.obs``.
-        max_iter_harmony: Maximum number of Harmony iterations.
-
-    Returns:
-        AnnData with ``X_pca_harmony``, neighbors, Leiden, and UMAP.
-    """
-    hm = _load_optional_module("harmonypy")
-
-    a = preprocess_for_integration(
-        adata=adata,
-        cfg=cfg,
-        use_hvg_by_batch=True,
-        batch_key_override=batch_key,
-        normalize_per_batch=True,
+    a = adata.copy()
+    # raw counts should be in layers["counts"]
+    scvi.model.SCVI.setup_anndata(a, batch_key=batch_key, layer="counts")
+    model = scvi.model.SCVI(
+        a, n_latent=n_latent, n_layers=n_layers, gene_likelihood="nb"
     )
-    # harmonypy -> torch does not accept numpy views with negative strides.
-    # Ensure a contiguous array before passing PCA matrix to Harmony.
-    pca_data = np.ascontiguousarray(a.obsm["X_pca"])
-    meta_data = a.obs[[batch_key]]
-    ho = hm.run_harmony(
-        pca_data,
-        meta_data,
-        [batch_key],
-        max_iter_harmony=max_iter_harmony,
+    model.train(max_epochs=n_epochs, early_stopping=True, batch_size=batch_size)
+
+    a.obsm["X_scVI"] = model.get_latent_representation()
+    a.uns["scvi_model"] = model     
+    sc.pp.neighbors(a, use_rep="X_scVI")
+    sc.tl.leiden(a)
+    sc.tl.umap(a)
+    return a
+
+
+ 
+def run_scanvi_workflow(
+    adata: ad.AnnData,
+    scvi_model,
+    label_key: str = "cell_type",
+    n_epochs: int = 20,
+) -> ad.AnnData:
+    import scvi
+
+    a = adata.copy()
+    scanvi_model = scvi.model.SCANVI.from_scvi_model(
+        scvi_model,
+        unlabeled_category="Unknown",
+        labels_key=label_key,
     )
+    scanvi_model.train(max_epochs=n_epochs, n_samples_per_label=100)
 
-    if ho.Z_corr.shape[0] == pca_data.shape[1]:
-        a.obsm["X_pca_harmony"] = ho.Z_corr.T
-    else:
-        a.obsm["X_pca_harmony"] = ho.Z_corr
+    a.obsm["X_scANVI"] = scanvi_model.get_latent_representation()
+    sc.pp.neighbors(a, use_rep="X_scANVI")
+    sc.tl.leiden(a)
+    sc.tl.umap(a)
+    return a
 
-    n_pcs = min(cfg.n_pcs, a.obsm["X_pca_harmony"].shape[1])
-    sc.pp.neighbors(a, n_pcs=n_pcs, use_rep="X_pca_harmony")
-    sc.tl.leiden(a, resolution=cfg.leiden_resolution)
+
+ 
+def run_scgpt_workflow(
+    adata: ad.AnnData,
+    model_dir: str = "models/scgpt",
+    batch_size: int = 64,
+) -> ad.AnnData:
+    import scgpt
+
+    a = adata.copy()
+    embed = scgpt.tasks.embed_data(
+        a, model_dir=model_dir, batch_size=batch_size,
+        use_fast_transformer=True,
+    )
+    a.obsm["X_scGPT"] = embed
+    sc.pp.neighbors(a, use_rep="X_scGPT")
+    sc.tl.leiden(a)
+    sc.tl.umap(a)
+    return a
+
+
+
+def run_geneformer_workflow(
+    adata: ad.AnnData,
+    model_dir: str = "models/geneformer",
+    forward_batch_size: int = 200,
+    nproc: int = 4,
+) -> ad.AnnData:
+    import numpy as np
+    # upload saved embedding .npy
+    embed_path = f"{model_dir}/geneformer_zeroshot_embeddings.npy"
+    a = adata.copy()
+    a.obsm["X_Geneformer"] = np.load(embed_path)
+    sc.pp.neighbors(a, use_rep="X_Geneformer")
+    sc.tl.leiden(a)
     sc.tl.umap(a)
     return a
