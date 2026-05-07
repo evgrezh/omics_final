@@ -377,6 +377,80 @@ def metric_ilisi(
     return float((ilisi_raw - 1.0) / (n_batches - 1.0))
 
 
+def metric_bras(
+    adata: ad.AnnData,
+    batch_key: str = "batch",
+    label_key: str = "cell_type",
+    use_rep: str = "X_pca",
+) -> float:
+    return float(scib_metrics.silhouette_batch(
+        X=np.asarray(adata.obsm[use_rep]),
+        labels=adata.obs[label_key].astype(str).to_numpy(),
+        batch=adata.obs[batch_key].astype(str).to_numpy(),
+        rescale=True,
+    ))
+
+
+def metric_pcr_comparison(
+    adata_pre: ad.AnnData,
+    adata_post: ad.AnnData,
+    batch_key: str = "batch",
+    use_rep: str = "X_pca",
+) -> float:
+    return float(scib_metrics.pcr_comparison(
+        adata_pre=adata_pre,
+        adata_post=adata_post,
+        covariate=batch_key,
+        embed=use_rep,
+    ))
+
+
+def metric_isolated_labels_f1(
+    adata: ad.AnnData,
+    label_key: str = "cell_type",
+    batch_key: str = "batch",
+    use_rep: str = "X_pca",
+) -> float:
+    return float(scib_metrics.isolated_labels(
+        adata, label_key=label_key, batch_key=batch_key,
+        embed=use_rep, cluster=True,
+    ))
+
+
+def metric_hvg_overlap(
+    adata_pre: ad.AnnData,
+    adata_post: ad.AnnData,
+    batch_key: str = "batch",
+    n_hvgs: int = 2000,
+) -> float:
+    return float(scib_metrics.hvg_overlap(
+        adata_pre, adata_post, batch=batch_key, n_hvg=n_hvgs
+    ))
+
+
+def metric_ari(
+    adata: ad.AnnData,
+    label_key: str = "cell_type",
+    cluster_key: str = "leiden",
+) -> float:
+    from sklearn.metrics import adjusted_rand_score
+    return float(adjusted_rand_score(
+        adata.obs[label_key].astype(str),
+        adata.obs[cluster_key].astype(str),
+    ))
+
+
+def metric_nmi(
+    adata: ad.AnnData,
+    label_key: str = "cell_type",
+    cluster_key: str = "leiden",
+) -> float:
+    from sklearn.metrics import normalized_mutual_info_score
+    return float(normalized_mutual_info_score(
+        adata.obs[label_key].astype(str),
+        adata.obs[cluster_key].astype(str),
+    ))
+
 def evaluate_methods(
     method_to_adata: Mapping[str, ad.AnnData],
     metrics: Mapping[str, Callable[[ad.AnnData], float]],
@@ -405,23 +479,114 @@ def plot_ilisi_boxplot(
     figsize: tuple[int, int] = (7, 4),
 ) -> None:
     """
-    Plot boxplot of per-cell raw iLISI distributions.
-
+    Boxplot per-cell iLISI distributions across methods.
     Args:
-        ilisi_scores: Mapping method name -> per-cell iLISI array.
+        ilisi_scores: Mapping method_name -> per-cell iLISI array.
         figsize: Figure size.
     """
-    plot_df = pd.DataFrame(
-        {
-            "method": np.concatenate([[k] * len(v) for k, v in ilisi_scores.items()]),
-            "iLISI": np.concatenate([v for v in ilisi_scores.values()]),
-        }
-    )
+    plot_df = pd.DataFrame({
+        "method": np.concatenate([[k] * len(v) for k, v in ilisi_scores.items()]),
+        "iLISI":  np.concatenate(list(ilisi_scores.values())),
+    })
     plt.figure(figsize=figsize)
     plot_df.boxplot(column="iLISI", by="method", grid=False)
     plt.suptitle("")
-    plt.title("raw iLISI")
+    plt.title("iLISI per-cell distribution")
     plt.ylabel("iLISI")
-    plt.xticks(rotation=90)
+    plt.xticks(rotation=45, ha="right")
     plt.xlabel("")
     plt.tight_layout()
+
+
+def plot_metrics_heatmap(
+    metrics_df: pd.DataFrame,
+    method_col: str = "method",
+    figsize: tuple[int, int] = (12, 5),
+    title: str = "Batch correction benchmark",
+) -> None:
+    import seaborn as sns
+
+    df = metrics_df.set_index(method_col)
+    plt.figure(figsize=figsize)
+    sns.heatmap(
+        df,
+        annot=True,
+        fmt=".3f",
+        cmap="YlOrRd",
+        linewidths=0.4,
+        cbar_kws={"shrink": 0.8},
+    )
+    plt.title(title)
+    plt.ylabel("")
+    plt.xticks(rotation=30, ha="right")
+    plt.tight_layout()
+
+
+def plot_metrics_barplot(
+    metrics_df: pd.DataFrame,
+    metric_col: str,
+    method_col: str = "method",
+    figsize: tuple[int, int] = (8, 4),
+    title: str | None = None,
+) -> None:
+    df = metrics_df.sort_values(metric_col, ascending=False)
+    plt.figure(figsize=figsize)
+    plt.bar(df[method_col], df[metric_col], color="steelblue", edgecolor="white")
+    plt.ylabel(metric_col)
+    plt.xlabel("")
+    plt.title(title or metric_col)
+    plt.xticks(rotation=45, ha="right")
+    plt.ylim(0, 1)
+    plt.tight_layout()
+
+
+def plot_batch_fraction(
+    adata: ad.AnnData,
+    cluster_key: str = "leiden",
+    batch_key: str = "batch",
+    figsize: tuple[int, int] = (6, 3),
+) -> None:
+    if cluster_key not in adata.obs.columns:
+        raise KeyError(f"Column `{cluster_key}` is missing in adata.obs.")
+    if batch_key not in adata.obs.columns:
+        raise KeyError(f"Column `{batch_key}` is missing in adata.obs.")
+        
+    batch_counts = (
+        adata.obs
+        .groupby([cluster_key, batch_key], observed=True)
+        .size()
+        .unstack(fill_value=0)
+    )
+    batch_frac = batch_counts.div(batch_counts.sum(axis=1), axis=0)
+
+    batch_frac.plot.bar(stacked=True, figsize=figsize, colormap="tab20")
+    plt.ylabel("Batch fraction")
+    plt.xlabel(cluster_key)
+    plt.title(f"Batch distribution per {cluster_key}")
+    plt.legend(bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=8, title=batch_key)
+    plt.tight_layout()
+
+
+def aggregate_pseudobulk(
+    adata: ad.AnnData,
+    cell_type_key: str = "cell_type",
+    donor_key: str = "donor_id",
+    output_dir: str = "results/deseq2",
+) -> None:
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+    for ct in adata.obs[cell_type_key].unique():
+        sub = adata[adata.obs[cell_type_key] == ct]
+        pseudo = (
+            sub.obs[[donor_key]]
+            .assign(idx=range(len(sub)))
+            .groupby(donor_key)["idx"]
+            .apply(lambda idxs: np.array(
+                sub[idxs.values].X.sum(axis=0)
+            ).ravel())
+        )
+        pd.DataFrame(
+            pseudo.tolist(),
+            index=pseudo.index,
+            columns=sub.var_names
+        ).T.to_csv(f"{output_dir}/pseudobulk_{ct.replace(' ', '_')}.csv")
