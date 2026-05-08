@@ -12,38 +12,38 @@ dependencies = [
   "scanpy",
   "scikit-learn",
   "scipy",
-  "seaborn",          # нужен для plot_metrics_heatmap
+  "seaborn",          
 ]
 
 [project.optional-dependencies]
-# Классические методы коррекции
+
 integration = [
   "combat-seq",       # ComBat (pycombat)
 ]
 
-# Deep learning методы
+
 deep = [
   "scvi-tools",       # scVI + scANVI
 ]
 
-# Foundation models
+
 foundation = [
   "scgpt",            # scGPT zero-shot
   "geneformer",       # Geneformer zero-shot (pip install geneformer)
 ]
 
-# Метрики
+
 metrics = [
   "scib-metrics",
   "scib",
 ]
 
-# Псевдобалк валидация
+
 deseq = [
-  "rpy2",             # для запуска DESeq2 из Python
+  "rpy2",             # for launch DESeq2 from Python
 ]
 
-# Всё сразу
+
 all = [
   "sc-batchbench[integration,deep,foundation,metrics,deseq]",
 ]
