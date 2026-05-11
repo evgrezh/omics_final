@@ -41,7 +41,7 @@ class ScVIConfig:
 @dataclass(frozen=True)
 class ScGPTConfig:                  
     model_dir: str = "models/scgpt"
-    n_hvgs: int = 3000
+    n_hvgs: int = 2000
     batch_size: int = 64
 
 @dataclass(frozen=True)
